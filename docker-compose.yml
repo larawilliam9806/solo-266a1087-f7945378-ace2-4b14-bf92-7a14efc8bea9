@@ -1,0 +1,61 @@
+services:
+  upstream-a:
+    build: .
+    command: ["python", "-m", "mock_upstream.server"]
+    environment:
+      UPSTREAM_ID: upstream-a
+      IP_BASE: "10"
+      DNS_PORT: "53"
+      CONTROL_PORT: "8080"
+      INITIAL_DELAY: "0"
+      A_TTL: "60"
+      SOA_MINIMUM: "30"
+    ports:
+      - "5301:53/udp"
+      - "8301:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/delay', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  upstream-b:
+    build: .
+    command: ["python", "-m", "mock_upstream.server"]
+    environment:
+      UPSTREAM_ID: upstream-b
+      IP_BASE: "172"
+      DNS_PORT: "53"
+      CONTROL_PORT: "8080"
+      INITIAL_DELAY: "0"
+      A_TTL: "60"
+      SOA_MINIMUM: "30"
+    ports:
+      - "5302:53/udp"
+      - "8302:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/delay', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: .
+    command: ["uvicorn", "dns_forwarder.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      UPSTREAM1_ID: upstream-a
+      UPSTREAM1_HOST: upstream-a
+      UPSTREAM1_DNS_PORT: "53"
+      UPSTREAM1_CONTROL_PORT: "8080"
+      UPSTREAM2_ID: upstream-b
+      UPSTREAM2_HOST: upstream-b
+      UPSTREAM2_DNS_PORT: "53"
+      UPSTREAM2_CONTROL_PORT: "8080"
+      DEFAULT_UPSTREAM_ID: upstream-a
+    ports:
+      - "8000:8000"
+    depends_on:
+      upstream-a:
+        condition: service_healthy
+      upstream-b:
+        condition: service_healthy

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内网 DNS 转发演示</title>
+<style>
+  :root {
+    --bg: #0f141b; --panel: #171f2a; --panel2: #1e2937; --line: #2a3a4d;
+    --text: #dbe4ee; --muted: #8aa0b6; --accent: #4da3ff; --green: #46d18d;
+    --red: #ff6b6b; --yellow: #ffce54; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--line); display: flex;
+    align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; max-width: 1280px; margin: 0 auto; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--accent);
+    display: flex; justify-content: space-between; align-items: center; }
+  .panel.full { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.mono, .mono { font-family: var(--mono); }
+  input, select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 7px 9px; font-size: 13px; outline: none; }
+  input:focus, select:focus { border-color: var(--accent); }
+  button { background: var(--accent); color: #08111d; border: 0; border-radius: 6px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  button.danger { background: transparent; color: var(--red); border: 1px solid #5a2b2b; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .tag.ok { background: rgba(70,209,141,.15); color: var(--green); }
+  .tag.nx { background: rgba(255,107,107,.15); color: var(--red); }
+  .tag.hit { background: rgba(77,163,255,.15); color: var(--accent); }
+  .tag.warn { background: rgba(255,206,84,.15); color: var(--yellow); }
+  .muted { color: var(--muted); }
+  #result { margin-top: 14px; }
+  .result-box { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  .result-box .kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; font-size: 13px; }
+  .result-box .kv .k { color: var(--muted); }
+  .addr { font-family: var(--mono); color: var(--green); }
+  .flash { font-size: 12px; padding: 8px 10px; border-radius: 6px; margin-bottom: 10px; display: none; }
+  .flash.show { display: block; }
+  .flash.ok { background: rgba(70,209,141,.12); color: var(--green); }
+  .flash.err { background: rgba(255,107,107,.12); color: var(--red); }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .ttl-bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 3px; }
+  .ttl-bar > i { display: block; height: 100%; background: var(--accent); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } .panel.full { grid-column: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>内网 DNS 转发演示</h1>
+  <span class="sub">最长后缀选上游 · TTL 缓存（含 NXDOMAIN）· 等待期间可改规则，旧回包按规则版本作废</span>
+</header>
+
+<main>
+  <!-- 上游与延迟 -->
+  <section class="panel">
+    <h2>本地上游与答复延迟 <span class="muted" style="font-weight:400" id="up-hint"></span></h2>
+    <div id="flash-up" class="flash"></div>
+    <table>
+      <thead><tr><th>上游</th><th>地址</th><th>延迟(秒)</th><th style="width:120px"></th></tr></thead>
+      <tbody id="up-tbody"></tbody>
+    </table>
+  </section>
+
+  <!-- 规则 -->
+  <section class="panel">
+    <h2>后缀 → 上游 规则 <span class="muted" style="font-weight:400">最长后缀匹配</span></h2>
+    <div id="flash-rule" class="flash"></div>
+    <table>
+      <thead><tr><th>后缀</th><th>上游</th><th>版本</th><th></th></tr></thead>
+      <tbody id="rule-tbody"></tbody>
+    </table>
+    <div class="row" style="margin-top:12px">
+      <input id="new-suffix" placeholder="后缀，如 corp.local（留空=默认）" style="flex:1;min-width:180px" />
+      <select id="new-upstream"></select>
+      <button id="btn-save-rule">保存规则</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">
+      改规则只会清掉<b>实际换了上游</b>的域名缓存；版本号在该后缀上游真实变更时 +1。
+    </p>
+  </section>
+
+  <!-- 试查 -->
+  <section class="panel full">
+    <h2>试查 A 记录</h2>
+    <div class="row">
+      <input id="query-name" placeholder="域名，如 git.corp.local（nx. 开头的域名上游回 NXDOMAIN）"
+             style="flex:1;min-width:260px" />
+      <button id="btn-query">查询</button>
+      <span id="query-state" class="muted"></span>
+    </div>
+    <div id="result"><p class="muted">输入域名开始查询。查询等待期间仍可修改规则或查询其他域名。</p></div>
+  </section>
+
+  <!-- 缓存 -->
+  <section class="panel full">
+    <h2>
+      缓存 <span class="muted" style="font-weight:400" id="cache-stats"></span>
+      <button class="ghost" id="btn-clear-cache" style="margin-left:auto">清空缓存</button>
+    </h2>
+    <table>
+      <thead><tr><th>域名</th><th>状态</th><th>地址</th><th>上游</th><th>命中后缀</th><th>TTL</th><th>剩余</th></tr></thead>
+      <tbody id="cache-tbody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let upstreamSeq = 0;
+
+function flash(elId, msg, ok = true) {
+  const el = $(elId);
+  el.textContent = msg;
+  el.className = "flash show " + (ok ? "ok" : "err");
+  setTimeout(() => el.classList.remove("show"), 3500);
+}
+
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+// ---------- 上游 ----------
+async function loadUpstreams() {
+  const seq = ++upstreamSeq;
+  let ups;
+  try { ups = await api("/api/upstreams"); }
+  catch (e) { $("up-hint").textContent = "控制口不可达: " + e.message; return; }
+  if (seq !== upstreamSeq) return;
+  $("up-hint").textContent = "";
+  $("up-tbody").innerHTML = ups.map(u => `
+    <tr>
+      <td><b>${u.label || u.id}</b><div class="muted mono" style="font-size:11px">${u.id}</div></td>
+      <td class="mono">${u.address}</td>
+      <td class="mono">${u.delay_seconds === null ? "—" : u.delay_seconds}</td>
+      <td>
+        <div class="row">
+          <input type="number" min="0" max="30" step="0.1" value="${u.delay_seconds ?? 0}"
+                 id="delay-${u.id}" style="width:70px" />
+          <button onclick="setDelay('${u.id}', this)">设置</button>
+        </div>
+      </td>
+    </tr>`).join("");
+  $("new-upstream").innerHTML = ups
+    .map(u => `<option value="${u.id}">${u.label || u.id}</option>`).join("");
+}
+
+async function setDelay(id, btn) {
+  const val = parseFloat($("delay-" + id).value);
+  btn.disabled = true;
+  try {
+    await api(`/api/upstreams/${encodeURIComponent(id)}/delay`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({delay_seconds: val}),
+    });
+    flash("flash-up", `上游 ${id} 答复延迟已设为 ${val}s`);
+    loadUpstreams();
+  } catch (e) { flash("flash-up", e.message, false); }
+  finally { btn.disabled = false; }
+}
+
+// ---------- 规则 ----------
+async function loadRules() {
+  const rules = await api("/api/rules");
+  $("rule-tbody").innerHTML = rules.map(r => `
+    <tr>
+      <td class="mono">${r.suffix === "*" ? "<span class='muted'>* 默认</span>" : r.suffix}</td>
+      <td class="mono">${r.upstream_id}</td>
+      <td><span class="tag warn">v${r.version}</span></td>
+      <td>${r.is_default ? "" :
+        `<button class="danger" onclick="delRule('${r.suffix}')">删除</button>`}</td>
+    </tr>`).join("");
+}
+
+async function saveRule() {
+  const suffix = $("new-suffix").value.trim();
+  const upstream_id = $("new-upstream").value;
+  try {
+    const r = await api("/api/rules", {
+      method: "PUT", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({suffix, upstream_id}),
+    });
+    if (r.changed) {
+      flash("flash-rule",
+        `规则已保存，按精确匹配清除 ${r.evicted.length} 条旧缓存：` +
+        (r.evicted.length ? r.evicted.join(", ") : "（无受影响域名）"));
+    } else {
+      flash("flash-rule", "上游未变化，规则与缓存均保持原样");
+    }
+    $("new-suffix").value = "";
+    loadRules(); loadCache();
+  } catch (e) { flash("flash-rule", e.message, false); }
+}
+
+async function delRule(suffix) {
+  try {
+    const r = await api(`/api/rules?suffix=${encodeURIComponent(suffix)}`, {method: "DELETE"});
+    flash("flash-rule",
+      `规则 ${suffix} 已删除，清除 ${r.evicted.length} 条旧缓存：` +
+      (r.evicted.length ? r.evicted.join(", ") : "（无受影响域名）"));
+    loadRules(); loadCache();
+  } catch (e) { flash("flash-rule", e.message, false); }
+}
+
+// ---------- 查询 ----------
+let queryToken = 0;
+async function doQuery() {
+  const name = $("query-name").value.trim();
+  if (!name) return;
+  const token = ++queryToken;
+  const btn = $("btn-query");
+  btn.disabled = true;
+  $("query-state").innerHTML = '<span class="spinner"></span> 等待上游回包（可同时改规则 / 查别的域名）';
+  try {
+    const r = await api(`/api/resolve?name=${encodeURIComponent(name)}`);
+    if (token !== queryToken) return; // 又发起了新查询，旧结果不渲染
+    renderResult(r);
+    loadCache();
+  } catch (e) {
+    if (token === queryToken)
+      $("result").innerHTML = `<div class="result-box"><span class="tag nx">ERROR</span> ${e.message}</div>`;
+  } finally {
+    if (token === queryToken) { btn.disabled = false; $("query-state").textContent = ""; }
+  }
+}
+
+function renderResult(r) {
+  const statusTag = r.status === "OK"
+    ? '<span class="tag ok">OK</span>'
+    : r.status === "ERROR"
+      ? '<span class="tag nx">ERROR</span>'
+      : `<span class="tag nx">${r.status}</span>`;
+  const cacheTag = r.cached_hit
+    ? '<span class="tag hit">缓存命中</span>'
+    : '<span class="tag muted" style="background:rgba(138,160,182,.15)">回源查询</span>';
+  const staleNote = r.stale_discarded
+    ? `<div class="tag warn" style="margin-top:8px">等待期间规则变化，已丢弃 ${r.stale_discarded} 个旧回包并按现行规则重查</div>` : "";
+  const body = r.status === "ERROR"
+    ? `<div class="kv"><div class="k">错误</div><div>${r.error}</div></div>`
+    : `<div class="kv">
+        <div class="k">域名</div><div class="mono">${r.name}</div>
+        <div class="k">结果</div><div>${
+          r.status === "OK"
+            ? r.addresses.map(a => `<span class="addr">${a}</span>`).join(" ")
+            : `<b>${r.status}</b>`
+        }</div>
+        <div class="k">上游</div><div class="mono">${r.upstream_id} <span class="muted">(后缀 ${r.suffix || "*"})</span></div>
+        <div class="k">缓存</div><div>${cacheTag}</div>
+        <div class="k">TTL</div><div class="mono">${r.ttl}s（报文 TTL: ${(r.raw_ttls && r.raw_ttls.length) ? r.raw_ttls.join(", ") : "—"}），剩余 ${r.remaining_ttl}s</div>
+        <div class="k">耗时</div><div class="mono">${r.elapsed_ms} ms</div>
+      </div>${staleNote}`;
+  $("result").innerHTML = `<div class="result-box">${statusTag}${body}</div>`;
+}
+
+// ---------- 缓存 ----------
+async function loadCache() {
+  const data = await api("/api/cache");
+  $("cache-stats").textContent = `共 ${data.stats.entries} 条 · 累计命中 ${data.stats.hits} 次`;
+  $("cache-tbody").innerHTML = data.entries.map(e => {
+    const pct = e.ttl ? Math.max(0, Math.round(e.remaining_ttl / e.ttl * 100)) : 0;
+    const tag = e.status === "OK"
+      ? '<span class="tag ok">OK</span>'
+      : `<span class="tag nx">${e.status}</span>`;
+    return `<tr>
+      <td class="mono">${e.name}</td>
+      <td>${tag}</td>
+      <td class="mono">${e.addresses.length ? e.addresses.map(a => `<span class="addr">${a}</span>`).join(" ") : "—"}</td>
+      <td class="mono">${e.upstream_id}</td>
+      <td class="mono">${e.suffix || "*"}</td>
+      <td class="mono">${e.ttl}s</td>
+      <td class="mono" style="min-width:110px">${e.remaining_ttl}s
+        <div class="ttl-bar"><i style="width:${pct}%"></i></div></td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="7" class="muted">暂无缓存</td></tr>';
+}
+
+// ---------- 初始化 ----------
+$("btn-save-rule").onclick = saveRule;
+$("btn-query").onclick = doQuery;
+$("query-name").addEventListener("keydown", e => { if (e.key === "Enter") doQuery(); });
+$("new-suffix").addEventListener("keydown", e => { if (e.key === "Enter") saveRule(); });
+$("btn-clear-cache").onclick = async () => {
+  await api("/api/cache", {method: "DELETE"});
+  loadCache();
+};
+loadUpstreams(); loadRules(); loadCache();
+setInterval(loadCache, 3000);
+setInterval(loadUpstreams, 5000);
+</script>
+</body>
+</html>
