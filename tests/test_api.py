@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import socket
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -121,3 +123,61 @@ def test_index_page_served(client):
     r = c.get("/")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
+
+
+def test_scheduler_endpoint_reports_queued_and_inflight(monkeypatch):
+    """网页轮询的 /api/scheduler：在途数、排队数、全局槽位。"""
+    port_a, port_b = _free_port(), _free_port()
+    fake_a = FakeUpstream("127.0.0.1", port_a, ip_base=10, delay=0.4)
+    fake_b = FakeUpstream("127.0.0.1", port_b, ip_base=172, delay=0.05)
+    registry = UpstreamRegistry(
+        [
+            Upstream("upstream-a", "A", "127.0.0.1", port_a, 1),
+            Upstream("upstream-b", "B", "127.0.0.1", port_b, 2),
+        ]
+    )
+    monkeypatch.setenv("UPSTREAM_MAX_CONCURRENCY", "2")
+    app = create_app(upstreams=registry)
+    with TestClient(app) as c:
+        # 初始空闲
+        stats = c.get("/api/scheduler").json()
+        assert stats["max_in_flight"] > 0 and stats["slots_used"] == 0
+        by_id = {u["upstream_id"]: u for u in stats["upstreams"]}
+        assert by_id["upstream-a"]["queued"] == 0
+        assert by_id["upstream-a"]["in_flight"] == 0
+
+        # 并发 4 个试查（共享同一套调度），在途中观察一次
+        results = []
+        errors = []
+
+        def worker(i):
+            try:
+                results.append(c.get("/api/resolve", params={"name": f"q{i}.corp.local"}))
+            except Exception as exc:  # pragma: no cover - 仅防线程崩溃
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.15)
+        mid = c.get("/api/scheduler").json()
+        by_id = {u["upstream_id"]: u for u in mid["upstreams"]}
+        assert mid["max_in_flight"] == 2
+        assert mid["slots_used"] == 2
+        assert by_id["upstream-a"]["in_flight"] == 2
+        assert by_id["upstream-a"]["queued"] == 2
+        assert len(by_id["upstream-a"]["queued_names"]) == 2
+        total_busy = sum(u["in_flight"] + u["queued"] for u in mid["upstreams"])
+        assert total_busy == 4
+        for t in threads:
+            t.join()
+        assert not errors
+        assert all(r.status_code == 200 for r in results)
+
+        # 全部结束后槽位归还
+        done = c.get("/api/scheduler").json()
+        assert done["slots_used"] == 0
+        assert all(u["in_flight"] == 0 and u["queued"] == 0 for u in done["upstreams"])
+
+    fake_a.stop()
+    fake_b.stop()

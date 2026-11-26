@@ -29,6 +29,16 @@ class RuleStore:
         # 已删除后缀的版本墓碑：删了又建回时版本继续递增，
         # 保证删除前发出的查询不会把新规则误判成"没动过"
         self._tombstones: dict[str, int] = {}
+        # 规则真实变更后的监听器（在锁外调用），Resolver 用它即时重排待发查询
+        self._listeners: list = []
+
+    def add_listener(self, callback) -> None:
+        """注册规则变更回调，回调在每次真实变更后、规则锁之外被调用。"""
+        self._listeners.append(callback)
+
+    def _notify(self) -> None:
+        for callback in list(self._listeners):
+            callback()
 
     # ---------- 读取 ----------
     def match(self, name: str) -> Rule:
@@ -70,7 +80,8 @@ class RuleStore:
             old_version = current[1] if current is not None else self._tombstones.get(suffix, 0)
             self._rules[suffix] = (upstream_id, old_version + 1)
             self._tombstones.pop(suffix, None)
-            return True
+        self._notify()
+        return True
 
     def delete_rule(self, suffix: str) -> bool:
         """删除一条规则。默认规则不可删除。返回是否实际删除。"""
@@ -82,7 +93,8 @@ class RuleStore:
                 return False
             _, version = self._rules.pop(suffix)
             self._tombstones[suffix] = version
-            return True
+        self._notify()
+        return True
 
     def is_stale(self, name: str, suffix: str, version: int) -> bool:
         """判断查询发出后，该域名命中的规则是否被动过。

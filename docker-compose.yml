@@ -52,6 +52,8 @@ services:
       UPSTREAM2_DNS_PORT: "53"
       UPSTREAM2_CONTROL_PORT: "8080"
       DEFAULT_UPSTREAM_ID: upstream-a
+      # 回源总并发上限（所有上游在途 UDP 查询合计），可按需调整
+      UPSTREAM_MAX_CONCURRENCY: "4"
     ports:
       - "8000:8000"
     depends_on:

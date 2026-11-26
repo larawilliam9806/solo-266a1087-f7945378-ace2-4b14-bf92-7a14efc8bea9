@@ -201,6 +201,11 @@ def create_app(
     def clear_cache() -> dict:
         return {"cleared": cache.clear()}
 
+    # ---------------- 调度状态（各上游排队数 / 在途数 / 全局槽位） ----------------
+    @app.get("/api/scheduler")
+    def scheduler_status() -> dict:
+        return resolver.stats()
+
     # ---------------- 试查 ----------------
     @app.get("/api/resolve")
     async def resolve(name: str = Query(..., description="要查询的域名")) -> dict:

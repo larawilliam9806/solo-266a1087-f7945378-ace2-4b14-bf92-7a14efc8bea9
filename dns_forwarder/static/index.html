@@ -70,9 +70,10 @@
     <h2>本地上游与答复延迟 <span class="muted" style="font-weight:400" id="up-hint"></span></h2>
     <div id="flash-up" class="flash"></div>
     <table>
-      <thead><tr><th>上游</th><th>地址</th><th>延迟(秒)</th><th style="width:120px"></th></tr></thead>
+      <thead><tr><th>上游</th><th>地址</th><th>延迟(秒)</th><th>排队</th><th>在途</th><th style="width:120px"></th></tr></thead>
       <tbody id="up-tbody"></tbody>
     </table>
+    <p class="muted" style="font-size:12px;margin:8px 0 0" id="scheduler-hint"></p>
   </section>
 
   <!-- 规则 -->
@@ -137,6 +138,7 @@ async function api(path, opts) {
 }
 
 // ---------- 上游 ----------
+let schedulerData = null;
 async function loadUpstreams() {
   const seq = ++upstreamSeq;
   let ups;
@@ -144,11 +146,20 @@ async function loadUpstreams() {
   catch (e) { $("up-hint").textContent = "控制口不可达: " + e.message; return; }
   if (seq !== upstreamSeq) return;
   $("up-hint").textContent = "";
-  $("up-tbody").innerHTML = ups.map(u => `
+  const sched = schedulerData;
+  $("up-tbody").innerHTML = ups.map(u => {
+    const st = sched ? sched.upstreams.find(x => x.upstream_id === u.id) : null;
+    const queued = st ? st.queued : "—";
+    const inflight = st ? st.in_flight : "—";
+    const qTitle = st && st.queued_names && st.queued_names.length
+      ? ` title="待发：\n${st.queued_names.join("\n")}"` : "";
+    return `
     <tr>
       <td><b>${u.label || u.id}</b><div class="muted mono" style="font-size:11px">${u.id}</div></td>
       <td class="mono">${u.address}</td>
       <td class="mono">${u.delay_seconds === null ? "—" : u.delay_seconds}</td>
+      <td class="mono"${qTitle}>${queued}</td>
+      <td class="mono">${inflight}</td>
       <td>
         <div class="row">
           <input type="number" min="0" max="30" step="0.1" value="${u.delay_seconds ?? 0}"
@@ -156,9 +167,22 @@ async function loadUpstreams() {
           <button onclick="setDelay('${u.id}', this)">设置</button>
         </div>
       </td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   $("new-upstream").innerHTML = ups
     .map(u => `<option value="${u.id}">${u.label || u.id}</option>`).join("");
+  if (sched) {
+    $("scheduler-hint").textContent =
+      `回源并发上限 ${sched.max_in_flight}：已用槽位 ${sched.slots_used}，空闲 ${sched.free_slots}。` +
+      `两台都有待发时空槽轮流分配；只有一台有待发时它可占满空槽。改规则会立即按新路由重排待发查询（保留原排队先后），在途查询占槽到回包为止。`;
+  }
+}
+
+async function loadScheduler() {
+  try {
+    schedulerData = await api("/api/scheduler");
+    loadUpstreams();  // 把排队/在途合并渲染进上游表
+  } catch (e) { /* 控制口短暂不可达时忽略，下一轮再试 */ }
 }
 
 async function setDelay(id, btn) {
@@ -299,9 +323,10 @@ $("btn-clear-cache").onclick = async () => {
   await api("/api/cache", {method: "DELETE"});
   loadCache();
 };
-loadUpstreams(); loadRules(); loadCache();
+loadUpstreams(); loadRules(); loadCache(); loadScheduler();
 setInterval(loadCache, 3000);
 setInterval(loadUpstreams, 5000);
+setInterval(loadScheduler, 1000);  // 排队数 / 在途数每秒刷新，配合 mock 延迟观察队列变化
 </script>
 </body>
 </html>
